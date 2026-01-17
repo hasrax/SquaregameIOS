@@ -32,6 +32,26 @@ enum GameMode: String, CaseIterable, Identifiable, Codable {
         case .hard: return "7 × 7 Grid"
         }
     }
+
+    // Distinct accent per mode (for cards / UI)
+    var accent: Color {
+        switch self {
+        case .easy: return Color(hue: 0.52, saturation: 0.75, brightness: 0.95)     // aqua
+        case .moderate: return Color(hue: 0.80, saturation: 0.75, brightness: 0.95) // violet
+        case .hard: return Color(hue: 0.05, saturation: 0.85, brightness: 0.95)     // orange/red
+        }
+    }
+
+    var tip: String {
+        switch self {
+        case .easy:
+            return "Tip: Scan corners first — the match pops out faster."
+        case .moderate:
+            return "Tip: Use peripheral vision — don’t stare at one tile too long."
+        case .hard:
+            return "Tip: Pick a pattern (rows/columns) and stick to it — saves time."
+        }
+    }
 }
 
 // MARK: - Shape Mode
@@ -61,8 +81,8 @@ struct ScoreEntry: Codable, Identifiable {
     let mode: GameMode
     let date: Date
 
-    init(name: String, score: Int, mode: GameMode, date: Date = Date()) {
-        self.id = UUID()
+    init(id: UUID = UUID(), name: String, score: Int, mode: GameMode, date: Date = Date()) {
+        self.id = id
         self.name = name
         self.score = score
         self.mode = mode
@@ -85,20 +105,32 @@ final class LeaderboardStore: ObservableObject {
         }
     }
 
-    func saveEntry(_ entry: ScoreEntry) {
-        entries.append(entry)
-        entries.sort { $0.score > $1.score }
-        if entries.count > 50 { entries = Array(entries.prefix(50)) }
-
+    private func persist() {
         do {
             let data = try JSONEncoder().encode(entries)
             leaderboardJSON = String(data: data, encoding: .utf8) ?? "[]"
         } catch { }
     }
 
-    func clear() {
-        entries = []
-        leaderboardJSON = "[]"
+    /// Save best score per (name + mode) to avoid duplicates spam.
+    func upsertBestScore(name: String, score: Int, mode: GameMode) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = cleanName.isEmpty ? "Player" : cleanName
+
+        if let idx = entries.firstIndex(where: { $0.name.lowercased() == finalName.lowercased() && $0.mode == mode }) {
+            // Only update if score is higher (keep best)
+            if score > entries[idx].score {
+                entries[idx] = ScoreEntry(id: entries[idx].id, name: finalName, score: score, mode: mode, date: Date())
+            } else {
+                // Also update timestamp occasionally? (optional) keep as-is
+            }
+        } else {
+            entries.append(ScoreEntry(name: finalName, score: score, mode: mode))
+        }
+
+        entries.sort { $0.score > $1.score }
+        if entries.count > 100 { entries = Array(entries.prefix(100)) }
+        persist()
     }
 
     func top(for mode: GameMode? = nil) -> [ScoreEntry] {
@@ -116,7 +148,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Main Menu
+// MARK: - Main Menu (more "main menu" feel)
 struct MainMenuView: View {
     @EnvironmentObject private var leaderboard: LeaderboardStore
 
@@ -127,14 +159,25 @@ struct MainMenuView: View {
     @State private var playerName: String = ""
     @State private var shapeModeEnabled: Bool = false
 
+    @State private var pulse = false
+    @State private var currentTipIndex = 0
+    private let menuTips: [String] = [
+        "⚡️ Fast taps in the first seconds = big bonus!",
+        "🔥 Keep a streak going — it boosts your score.",
+        "🧠 In hard mode: scan in a pattern (rows/columns).",
+        "🌈 Shape Mode: match BOTH color + shape."
+    ]
+    private let tipTicker = Timer.publish(every: 3.5, on: .main, in: .common).autoconnect()
+
     var body: some View {
         ZStack {
             galaxyBackground
 
             VStack(spacing: 18) {
+                // Title area
                 VStack(spacing: 10) {
                     Text("🎨 ColorGame")
-                        .font(.system(size: 40, weight: .bold))
+                        .font(.system(size: 42, weight: .bold))
                         .foregroundColor(.white)
                         .shadow(radius: 4)
 
@@ -145,6 +188,20 @@ struct MainMenuView: View {
                         .padding(.horizontal, 16)
                         .background(Color.black.opacity(0.25))
                         .cornerRadius(12)
+
+                    // Rotating tips (more interactive menu)
+                    Text(menuTips[currentTipIndex])
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.92))
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 14)
+                        .background(Color.black.opacity(0.28))
+                        .cornerRadius(14)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                        .transition(.opacity)
                 }
                 .padding(.top, 10)
 
@@ -162,10 +219,9 @@ struct MainMenuView: View {
                                 pendingMode = m
                                 showNameSheet = true
                             } label: {
-                                MenuCard(
-                                    title: "Play \(m.title)",
-                                    subtitle: "\(m.subtitle) • \(m.roundTime)s",
-                                    icon: "play.fill"
+                                ModeCard(
+                                    mode: m,
+                                    isPulsing: pulse
                                 )
                             }
                             .buttonStyle(.plain)
@@ -184,11 +240,11 @@ struct MainMenuView: View {
                     .padding(14)
                     .background(Color.black.opacity(0.22))
                     .cornerRadius(14)
-                    .shadow(radius: 2)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
                     .padding(.horizontal)
-
-                    MenuLeaderboardPreview()
-                        .padding(.horizontal)
 
                     HStack(spacing: 12) {
                         NavigationLink {
@@ -208,7 +264,7 @@ struct MainMenuView: View {
 
                 Spacer()
 
-                Text("Tip: Speed + streak bonuses give more points!")
+                Text("Pick a mode • Enter your name • Beat the galaxy ✨")
                     .font(.footnote)
                     .foregroundColor(.white.opacity(0.75))
                     .padding(.bottom, 10)
@@ -216,6 +272,17 @@ struct MainMenuView: View {
             .padding()
         }
         .navigationBarTitleDisplayMode(.inline)
+
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+        .onReceive(tipTicker) { _ in
+            withAnimation(.easeInOut(duration: 0.25)) {
+                currentTipIndex = (currentTipIndex + 1) % menuTips.count
+            }
+        }
 
         .navigationDestination(item: $selectedMode) { mode in
             GameView(
@@ -265,99 +332,85 @@ struct MainMenuView: View {
     }
 }
 
-// MARK: - Menu mini leaderboard preview
-struct MenuLeaderboardPreview: View {
-    @EnvironmentObject private var leaderboard: LeaderboardStore
+// MARK: - Interactive Mode Card
+struct ModeCard: View {
+    let mode: GameMode
+    let isPulsing: Bool
 
-    var body: some View {
-        let topAll = leaderboard.top(for: nil)
-
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Top Scores")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                Spacer()
-                Image(systemName: "trophy.fill")
-                    .foregroundColor(.white.opacity(0.85))
-            }
-
-            if topAll.isEmpty {
-                Text("No scores yet. Play a game and save your score!")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.8))
-            } else {
-                VStack(spacing: 8) {
-                    ForEach(Array(topAll.prefix(3).enumerated()), id: \.element.id) { idx, item in
-                        HStack {
-                            Text("#\(idx + 1)")
-                                .foregroundColor(.white.opacity(0.85))
-                                .frame(width: 34, alignment: .leading)
-
-                            Text(item.name)
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-
-                            Spacer()
-
-                            Text("\(item.score)")
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
-
-                            Text(item.mode.title)
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.75))
-                                .padding(.leading, 6)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .background(Color.black.opacity(0.22))
-        .cornerRadius(14)
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(radius: 2)
-    }
-}
-
-// MARK: - UI Pieces
-struct MenuCard: View {
-    let title: String
-    let subtitle: String
-    let icon: String
+    @State private var pressed = false
 
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
-                Circle().fill(Color.white.opacity(0.12)).frame(width: 44, height: 44)
-                Image(systemName: icon).foregroundColor(.white.opacity(0.95))
+                Circle()
+                    .fill(mode.accent.opacity(0.22))
+                    .frame(width: 48, height: 48)
+                    .overlay(
+                        Circle().stroke(mode.accent.opacity(0.35), lineWidth: 1)
+                    )
+
+                Image(systemName: icon(for: mode))
+                    .foregroundColor(.white.opacity(0.95))
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.headline).fontWeight(.semibold).foregroundColor(.white)
-                Text(subtitle).font(.subheadline).foregroundColor(.white.opacity(0.82))
+                Text("Play \(mode.title)")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+
+                Text("\(mode.subtitle) • \(mode.roundTime)s")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.82))
+
+                Text(mode.tip)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.70))
+                    .lineLimit(1)
             }
 
             Spacer()
-            Image(systemName: "chevron.right").foregroundColor(.white.opacity(0.75))
+
+            Image(systemName: "chevron.right")
+                .foregroundColor(.white.opacity(0.75))
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 18)
                 .fill(Color.black.opacity(0.22))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(mode.accent.opacity(0.35), lineWidth: 1)
                 )
         )
         .shadow(radius: 2)
+        .scaleEffect(pressed ? 0.98 : (isPulsing ? 1.0 : 1.0))
+        .overlay(alignment: .topTrailing) {
+            // Little "glow dot" for interactive feel
+            Circle()
+                .fill(mode.accent.opacity(0.9))
+                .frame(width: 8, height: 8)
+                .padding(12)
+                .opacity(isPulsing ? 0.9 : 0.7)
+        }
+        .animation(.easeInOut(duration: 0.18), value: pressed)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressed = true }
+                .onEnded { _ in pressed = false }
+        )
+    }
+
+    private func icon(for mode: GameMode) -> String {
+        switch mode {
+        case .easy: return "sparkles"
+        case .moderate: return "bolt.fill"
+        case .hard: return "flame.fill"
+        }
     }
 }
 
+// MARK: - UI Pieces
 struct SmallMenuButton: View {
     let title: String
     let icon: String
@@ -461,7 +514,7 @@ struct HowToPlayView: View {
                     tipCard("Timer", "If time ends, the round restarts (score stays).")
                     tipCard("Bonuses", "⚡️ Speed: +2 (≤5s), +3 (≤2s)\n🔥 Streak: +2 at 3, +5 at 5 correct in a row")
                     tipCard("Shape Mode", "If enabled, match BOTH the color and the shape.")
-                    tipCard("Leaderboard", "Tap “Save to Leaderboard” in-game to keep your best scores.")
+                    tipCard("Pro Tips", "• Scan in a pattern (rows/columns)\n• Don’t stare at one tile too long\n• In Hard mode, focus on comparing brightness first")
 
                     Spacer(minLength: 18)
                 }
@@ -486,7 +539,7 @@ struct HowToPlayView: View {
     }
 }
 
-// MARK: - Leaderboard Screen
+// MARK: - Leaderboard Screen (no clear button)
 struct LeaderboardView: View {
     @EnvironmentObject private var leaderboard: LeaderboardStore
     @State private var filter: GameMode? = nil
@@ -521,7 +574,7 @@ struct LeaderboardView: View {
 
                 let rows = leaderboard.top(for: filter)
                 if rows.isEmpty {
-                    Text("No scores yet.\nPlay and save your score.")
+                    Text("No scores yet.\nPlay a game and your best score will be saved automatically.")
                         .multilineTextAlignment(.center)
                         .foregroundColor(.white.opacity(0.85))
                         .padding(.top, 18)
@@ -564,17 +617,6 @@ struct LeaderboardView: View {
                     }
                 }
 
-                Button(role: .destructive) { leaderboard.clear() } label: {
-                    Text("Clear Leaderboard")
-                        .font(.footnote)
-                        .foregroundColor(.white.opacity(0.9))
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 14)
-                        .background(Color.black.opacity(0.22))
-                        .cornerRadius(12)
-                }
-                .padding(.top, 6)
-
                 Spacer()
             }
             .padding()
@@ -600,7 +642,7 @@ struct LeaderboardView: View {
     }
 }
 
-// MARK: - Game Screen
+// MARK: - Game Screen (auto-save best score)
 struct GameView: View {
     let mode: GameMode
     let shapeModeEnabled: Bool
@@ -630,7 +672,17 @@ struct GameView: View {
     private let ticker = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
 
     @State private var streak: Int = 0
-    @State private var toastText: String? = nil
+
+    // Big, appealing popup
+    @State private var popup: BigPopup? = nil
+
+    struct BigPopup: Identifiable, Equatable {
+        let id = UUID()
+        let title: String
+        let subtitle: String
+        let emoji: String
+        let accent: Color
+    }
 
     private var progress: Double {
         guard mode.roundTime > 0 else { return 0 }
@@ -682,8 +734,8 @@ struct GameView: View {
 
                     if streak >= 2 {
                         Text("🔥 Streak: \(streak)")
-                            .font(.footnote)
-                            .foregroundColor(.white.opacity(0.9))
+                            .font(.footnote.weight(.semibold))
+                            .foregroundColor(.white.opacity(0.95))
                             .padding(.vertical, 6)
                             .padding(.horizontal, 12)
                             .background(Color.black.opacity(0.25))
@@ -713,7 +765,7 @@ struct GameView: View {
                     .shadow(radius: 5)
 
                     Text(shapeModeEnabled ? "Match color + shape" : "Match this color")
-                        .font(.subheadline)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                 }
                 .padding(.vertical, 6)
@@ -733,55 +785,41 @@ struct GameView: View {
                     }
                 }
 
-                Button {
-                    leaderboard.saveEntry(ScoreEntry(name: playerName, score: score, mode: mode))
-                    showToast("Saved ✅")
-                } label: {
-                    Text("Save to Leaderboard")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.vertical, 12)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.black.opacity(0.22))
-                        .cornerRadius(14)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
-                }
-                .padding(.top, 6)
-
                 Spacer()
             }
             .padding()
 
             if showConfetti { ConfettiView().transition(.opacity) }
 
-            if let toastText {
-                VStack {
-                    Spacer()
-                    Text(toastText)
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 16)
-                        .background(Color.black.opacity(0.55))
-                        .cornerRadius(14)
-                        .shadow(radius: 3)
-                        .padding(.bottom, 24)
-                }
-                .transition(.opacity)
+            // Big popup overlay (center)
+            if let popup {
+                BigPopupView(popup: popup)
+                    .transition(.scale.combined(with: .opacity))
+                    .zIndex(20)
             }
         }
-        .onAppear { startRound(resetTimer: true) }
+        .onAppear {
+            startRound(resetTimer: true)
+            // ensure at least a zero-score entry exists (optional)
+            leaderboard.upsertBestScore(name: playerName, score: score, mode: mode)
+        }
+        .onDisappear {
+            // save best when leaving
+            leaderboard.upsertBestScore(name: playerName, score: score, mode: mode)
+        }
         .onReceive(ticker) { _ in
             let remaining = Int(ceil(roundEndTime.timeIntervalSinceNow))
             timeLeft = max(0, remaining)
 
             if timeLeft == 0 {
                 streak = 0
-                showToast("Time’s up! Restarting…")
                 triggerHaptic(success: false)
+                showBigPopup(
+                    title: "Time’s Up!",
+                    subtitle: "Round restarted — keep going!",
+                    emoji: "⏳",
+                    accent: mode.accent
+                )
                 startRound(resetTimer: true)
             }
         }
@@ -868,25 +906,38 @@ struct GameView: View {
             var gained = 1
 
             let elapsed = mode.roundTime - timeLeft
-            if elapsed <= 2 { gained += 3; showToast("⚡️ Speed Bonus +3") }
-            else if elapsed <= 5 { gained += 2; showToast("⚡️ Speed Bonus +2") }
+            if elapsed <= 2 {
+                gained += 3
+                showBigPopup(title: "Speed Bonus!", subtitle: "+3 Points", emoji: "⚡️", accent: mode.accent)
+            } else if elapsed <= 5 {
+                gained += 2
+                showBigPopup(title: "Quick Bonus!", subtitle: "+2 Points", emoji: "⚡️", accent: mode.accent)
+            }
 
             streak += 1
-            if streak == 3 { gained += 2; showToast("🔥 Streak Bonus +2") }
-            else if streak == 5 { gained += 5; showToast("🔥 Streak Bonus +5") }
+            if streak == 3 {
+                gained += 2
+                showBigPopup(title: "Streak!", subtitle: "+2 Points", emoji: "🔥", accent: mode.accent)
+            } else if streak == 5 {
+                gained += 5
+                showBigPopup(title: "HOT STREAK!", subtitle: "+5 Points", emoji: "🔥", accent: mode.accent)
+            }
 
             score += gained
 
+            // ✅ Auto-save best score continuously
+            leaderboard.upsertBestScore(name: playerName, score: score, mode: mode)
+
             showConfetti = true
             triggerHaptic(success: true)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showConfetti = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showConfetti = false }
 
             round += 1
             if round > maxRounds {
                 round = 1
                 score = 0
                 streak = 0
-                showToast("New run started!")
+                showBigPopup(title: "New Run!", subtitle: "Fresh start ✨", emoji: "🚀", accent: mode.accent)
             }
 
             withAnimation(.easeInOut(duration: 0.25)) {
@@ -896,15 +947,21 @@ struct GameView: View {
             showWrongFeedback = true
             streak = 0
             triggerHaptic(success: false)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showWrongFeedback = false }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                showWrongFeedback = false
+            }
         }
     }
 
-    private func showToast(_ text: String) {
-        withAnimation(.easeInOut(duration: 0.2)) { toastText = text }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+    private func showBigPopup(title: String, subtitle: String, emoji: String, accent: Color) {
+        let newPopup = BigPopup(title: title, subtitle: subtitle, emoji: emoji, accent: accent)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            popup = newPopup
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             withAnimation(.easeInOut(duration: 0.2)) {
-                if toastText == text { toastText = nil }
+                if popup == newPopup { popup = nil }
             }
         }
     }
@@ -912,6 +969,45 @@ struct GameView: View {
     private func triggerHaptic(success: Bool) {
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(success ? .success : .error)
+    }
+}
+
+// MARK: - Big Popup View
+struct BigPopupView: View {
+    let popup: GameView.BigPopup
+
+    var body: some View {
+        VStack {
+            Spacer()
+
+            VStack(spacing: 10) {
+                Text(popup.emoji)
+                    .font(.system(size: 44))
+
+                Text(popup.title)
+                    .font(.title2.weight(.heavy))
+                    .foregroundColor(.white)
+
+                Text(popup.subtitle)
+                    .font(.headline.weight(.semibold))
+                    .foregroundColor(.white.opacity(0.92))
+            }
+            .padding(.vertical, 18)
+            .padding(.horizontal, 20)
+            .background(
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(Color.black.opacity(0.45))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22)
+                            .stroke(popup.accent.opacity(0.65), lineWidth: 2)
+                    )
+                    .shadow(radius: 8)
+            )
+            .padding(.bottom, 80)
+
+            Spacer()
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -1062,7 +1158,7 @@ struct StarShape: Shape {
     }
 }
 
-// MARK: - Previews (✅ FIX: provide env object)
+// MARK: - Previews (✅ env object)
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
